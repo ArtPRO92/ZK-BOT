@@ -1,0 +1,68 @@
+import torch
+from transformers import BertTokenizerFast, BertForTokenClassification
+from datasets import load_from_disk
+from seqeval.metrics import classification_report, f1_score
+from pathlib import Path
+import json
+
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_DIR = BASE_DIR / "best_model"
+DATA_DIR = BASE_DIR / "dataset"
+REPORT_PATH = BASE_DIR / "logs" / "eval_metrics.json"
+SOURCE_DATA_PATH = BASE_DIR / "bio_dataset.jsonl"
+
+print("🔄 Загружаем модель и токенизатор...")
+model = BertForTokenClassification.from_pretrained(MODEL_DIR)
+tokenizer = BertTokenizerFast.from_pretrained(MODEL_DIR)
+model.eval()
+
+print("📥 Загружаем тестовый датасет...")
+dataset = load_from_disk(str(DATA_DIR))["test"]
+
+# Загружаем список меток из исходного jsonl
+with open(SOURCE_DATA_PATH, "r", encoding="utf-8") as f:
+    raw_data = [json.loads(line) for line in f]
+
+labels_set = set()
+for sample in raw_data:
+    labels_set.update(sample["labels"])
+label_list = sorted(labels_set)
+
+true_labels = []
+pred_labels = []
+
+print("🧠 Предсказываем...")
+for example in dataset:
+    tokens = example["tokens"]
+    labels = example["labels"]
+
+    inputs = tokenizer(tokens, is_split_into_words=True, return_tensors="pt", truncation=True, padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    predictions = torch.argmax(outputs.logits, dim=2).squeeze().tolist()
+    word_ids = inputs.word_ids()
+
+    true, pred = [], []
+    previous_word_idx = None
+    for idx, word_idx in enumerate(word_ids):
+        if word_idx is None or word_idx == previous_word_idx:
+            continue
+        true.append(label_list[labels[word_idx]])
+        pred.append(label_list[predictions[idx]])
+        previous_word_idx = word_idx
+
+    true_labels.append(true)
+    pred_labels.append(pred)
+
+print("\n📊 Результаты оценки:")
+report = classification_report(true_labels, pred_labels, output_dict=True, zero_division=0)
+print(json.dumps(report, indent=2, ensure_ascii=False))
+
+# Сохраняем отчёт
+REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+with open(REPORT_PATH, "w", encoding="utf-8") as f:
+    json.dump(report, f, ensure_ascii=False, indent=2)
+
+print(f"✅ Отчёт сохранён в {REPORT_PATH}")
+print("🎯 F1-Score:", round(f1_score(true_labels, pred_labels), 4))
